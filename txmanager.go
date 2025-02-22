@@ -14,9 +14,11 @@ import (
 // 2. TCC 组件注册模块
 // 3. 串联两个流程
 type TXManager struct {
-	ctx            context.Context
-	stop           context.CancelFunc
-	opts           *Options
+	ctx  context.Context
+	stop context.CancelFunc
+
+	opts *Options
+
 	txStore        TXStore
 	registryCenter *registryCenter
 }
@@ -37,7 +39,7 @@ func NewTXManager(txStore TXStore, opts ...Option) *TXManager {
 
 	repair(txManager.opts)
 
-	go txManager.run()
+	go txManager.run() // 异步轮询
 	return &txManager
 }
 
@@ -72,22 +74,21 @@ func (t *TXManager) Transaction(ctx context.Context, reqs ...*RequestEntity) (st
 
 func (t *TXManager) backOffTick(tick time.Duration) time.Duration {
 	tick <<= 1
-	if threshold := t.opts.MonitorTick << 3; tick > threshold {
-		return threshold
-	}
-	return tick
+	return minDu(tick, t.opts.MonitorTick<<3)
 }
 
 func (t *TXManager) run() {
 	var tick time.Duration
 	var err error
 	for {
-		// 如果出现了失败，tick 需要避让，遵循退避策略增大 tick 间隔时长
+		// !根据上一轮是否出现错误动态调整 tick 间隔
+		// !如果出现了失败，tick 需要避让，遵循退避策略增大 tick 间隔时长
 		if err == nil {
 			tick = t.opts.MonitorTick
 		} else {
 			tick = t.backOffTick(tick)
 		}
+
 		select {
 		case <-t.ctx.Done():
 			return
@@ -113,8 +114,8 @@ func (t *TXManager) run() {
 	}
 }
 
+// 对每笔事务进行状态推进
 func (t *TXManager) batchAdvanceProgress(txs []*Transaction) error {
-	// 对每笔事务进行状态推进
 	errCh := make(chan error)
 	go func() {
 		// 并发执行，推进各比事务的进度
@@ -254,7 +255,7 @@ func (t *TXManager) twoPhaseCommit(ctx context.Context, txID string, componentEn
 		}
 
 		wg.Wait()
-		close(errCh)
+		close(errCh) // 关闭 errCh，告知父 goroutine 所有任务已运行完成的信息
 	}()
 
 	successful := true
@@ -305,4 +306,11 @@ func (t *TXManager) getComponents(ctx context.Context, reqs ...*RequestEntity) (
 	}
 
 	return entities, nil
+}
+
+func minDu(a, b time.Duration) time.Duration {
+	if a < b {
+		return a
+	}
+	return b
 }
